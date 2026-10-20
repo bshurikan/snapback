@@ -292,61 +292,23 @@ static void reload_config() {
 }
 
 // ─── Polling mode ──────────────────────────────────────────────────────────
+// IMPORTANT: do NOT hold psc:m / PscPmModuleId_Bluetooth open for the life of
+// this sysmodule. On Horizon, always-on client sessions are scarce; a forever
+// PSC (or time:u) hold from a boot2 module can starve qlaunch — blank HOME
+// clock, broken timezones / network sync — especially once another applet
+// (e.g. Sphaira) is also suspended. Same class of bug as Switch Frame Tap's
+// old timeInitialize() hold. BT sessions stay brief (bt_open / bt_close).
 static void run_polling() {
     log_print("[main] Mode: polling (interval=%ds)\n", g_polling_interval_sec);
+    log_print("[main] PSC screen-tracking off in polling (no forever psc:m hold)\n");
     int attempt = 0;
     bool was_connected = false;
-    bool screen_on = true;
-
-    // Register with PSC to track screen state (optional — falls back gracefully)
-    PscPmModule psc = {};
-    bool psc_ok = false;
-    if (R_SUCCEEDED(pscmInitialize())) {
-        if (R_SUCCEEDED(pscmGetPmModule(&psc, PscPmModuleId_Bluetooth, nullptr, 0, true))) {
-            psc_ok = true;
-            log_print("[psc] Screen-state tracking active\n");
-        } else {
-            pscmExit();
-        }
-    }
 
     while (true) {
-        // Drain any pending PSC events to update screen_on state
-        if (psc_ok) {
-            while (R_SUCCEEDED(eventWait(&psc.event, 0))) {
-                PscPmState state; u32 flags;
-                if (R_SUCCEEDED(pscPmModuleGetRequest(&psc, &state, &flags))) {
-                    if (state == PscPmState_Awake || state == PscPmState_ReadyAwaken) {
-                        log_print("[psc] Screen on\n");
-                        screen_on = true;
-                    } else if (state == PscPmState_ReadySleep || state == PscPmState_ReadySleepCritical) {
-                        log_print("[psc] Screen off -- pausing\n");
-                        screen_on = false;
-                    }
-                    pscPmModuleAcknowledge(&psc, state);
-                }
-            }
-        }
-
-        // If screen is off, wait for it to come back on
-        if (psc_ok && !screen_on) {
-            PscPmState state; u32 flags;
-            if (R_SUCCEEDED(eventWait(&psc.event, UINT64_MAX)) &&
-                R_SUCCEEDED(pscPmModuleGetRequest(&psc, &state, &flags))) {
-                if (state == PscPmState_Awake || state == PscPmState_ReadyAwaken) {
-                    log_print("[psc] Screen on -- resuming\n");
-                    screen_on = true;
-                }
-                pscPmModuleAcknowledge(&psc, state);
-            }
-            continue; // re-check state at top of loop
-        }
-
         // Hot reload config each cycle
         reload_config();
         if (g_mode == MODE_WAKE) {
             log_print("[main] Config changed to wake mode, switching.\n");
-            if (psc_ok) { pscPmModuleClose(&psc); pscmExit(); }
             return;
         }
 
@@ -371,8 +333,6 @@ static void run_polling() {
         log_print("[main] Sleeping %ds ...\n", sleep_sec);
         svcSleepThread((u64)sleep_sec * 1'000'000'000ULL);
     }
-
-    if (psc_ok) { pscPmModuleClose(&psc); pscmExit(); }
 }
 
 // ─── Wake mode ─────────────────────────────────────────────────────────────
@@ -451,7 +411,7 @@ int main(int, char**) {
     log_open();
 
     log_print("==============================================\n");
-    log_print("  snapback v1.1  (%s %s)\n", __DATE__, __TIME__);
+    log_print("  snapback v1.1-sft1  (%s %s)\n", __DATE__, __TIME__);
     log_print("==============================================\n");
 
     load_config();
